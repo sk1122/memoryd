@@ -1,0 +1,23 @@
+# M0 spike: ParadeDB = Postgres + pgvector + pg_search (real BM25) in one image.
+# Pin a concrete tag before this leaves spike status; `latest` is for the spike.
+services:
+  db:
+    image: paradedb/paradedb:latest
+    container_name: memoryd-db
+    environment:
+      POSTGRES_USER: memoryd
+      POSTGRES_PASSWORD: memoryd
+      POSTGRES_DB: memoryd
+    ports:
+      - "5433:5432"   # host 5433 -> container 5432 (5432 already in use locally)
+    volumes:
+      - memoryd_pgdata:/var/lib/postgresql   # PG18+ layout: mount the parent, not /data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memoryd -d memoryd"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  memoryd_pgdata:

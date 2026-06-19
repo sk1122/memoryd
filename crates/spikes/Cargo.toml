@@ -1,0 +1,24 @@
+[package]
+name = "spikes"
+version = "0.1.0"
+edition = "2021"
+
+# M0 integration spikes. Heavy deps live here, isolated from the novelty lib.
+
+[[bin]]
+name = "spike_embed"
+path = "src/bin/spike_embed.rs"
+
+[[bin]]
+name = "spike_llm"
+path = "src/bin/spike_llm.rs"
+
+[dependencies]
+# fastembed wraps ort (ONNX Runtime) + tokenizers + model download. Using it
+# validates the ort runtime path on this machine while giving a turnkey result;
+# if a future model isn't in fastembed's catalog we drop to raw `ort`, which
+# fastembed proves is viable here.
+fastembed = "4"
+anyhow = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde_json = "1"

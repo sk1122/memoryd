@@ -1,0 +1,25 @@
+[workspace]
+members = ["crates/spikes", "crates/store"]
+
+[package]
+name = "memoryd"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "memoryd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "locomo_eval"
+path = "src/bin/locomo_eval.rs"
+
+[dependencies]
+# zlib-rs: pure-Rust zlib port. Byte-identical to reference zlib (and thus
+# TrueMemory's Python gzip) to within a 1-byte zlib-version artifact, while
+# keeping the single-static-binary goal (no C dependency).
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3

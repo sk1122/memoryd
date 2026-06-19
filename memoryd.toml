@@ -1,0 +1,17 @@
+# memoryd configuration. Gate thresholds live here so they can be tuned
+# without recompiling (and, later, hot-reloaded).
+
+[database]
+url = "postgres://memoryd:memoryd@localhost:5433/memoryd"
+
+[gate]
+# Admit a message when novelty >= threshold (and salience clears the floor).
+# 0.30 is the M1 LoCoMo operating point: ~97% evidence retained, ~14% dropped.
+novelty_threshold = 0.30
+salience_floor = 0.10
+# How many nearest stored memories form the compression context.
+neighbor_k = 10
+
+[embedding]
+model = "bge-small-en-v1.5"
+dim = 384

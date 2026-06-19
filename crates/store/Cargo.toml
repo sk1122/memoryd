@@ -1,0 +1,29 @@
+[package]
+name = "store"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ingest_demo"
+path = "src/bin/ingest_demo.rs"
+
+[[bin]]
+name = "bench_ingest"
+path = "src/bin/bench_ingest.rs"
+
+[[bin]]
+name = "locomo_qa"
+path = "src/bin/locomo_qa.rs"
+
+[dependencies]
+memoryd = { path = "../.." }            # novelty + salience + correction signals
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"] }
+pgvector = { version = "0.4", default-features = false, features = ["sqlx"] }
+fastembed = "4"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
+jsonwebtoken = "9"

@@ -1,0 +1,19 @@
+# Rust
+target/
+Cargo.lock
+
+# Embedding caches (large binary files, regenerated on demand)
+data/cache_*.bin
+
+# Logs
+logs/
+
+# fastembed ONNX model cache
+.fastembed_cache/
+
+# Secrets — keep credentials out; allow vendored benchmark data
+*.json
+!data/locomo10.json
+
+# macOS
+.DS_Store
