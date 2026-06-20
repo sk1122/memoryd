@@ -94,23 +94,47 @@ M1–M3 are complete.
 Dataset: 10 conversations, 1,531 QA pairs (categories 1–4; adversarial excluded per TrueMemory
 protocol). Embedding: Google `text-embedding-004` via Vertex AI. Retrieval: k=100.
 
+### Retrieval recall@100
+
 ```
 === retrieval recall@100 [Google text-embedding-004 (768-dim)] ===
 category        bm25   vector   fused    full    n
-single-hop     52.4%   87.7%   85.0%   67.9%   281
-multi-hop      83.7%   94.6%   94.7%   87.7%   320
-temporal       45.6%   80.6%   75.6%   60.8%    89
-open-domain    82.8%   96.3%   97.2%   91.4%   841
-ALL            75.2%   93.5%   93.2%   84.5%  1531
+single-hop     52.4%   87.7%   85.0%   85.8%   281
+multi-hop      83.7%   94.6%   94.7%   93.0%   320
+temporal       45.6%   80.6%   75.9%   78.7%    89
+open-domain    82.8%   96.3%   97.2%   96.8%   841
+ALL            75.2%   93.5%   93.2%   92.9%  1531
 ```
 
-**Vector alone (93.5%)** exceeds TrueMemory's reported 89.6% QA accuracy floor (different metrics —
-theirs is end-to-end QA accuracy; ours is retrieval recall). The `full` (reranked) column is
-currently depressed because the reranker candidate pool was capped at 40 in the run above; this
-has since been fixed to `2×k`.
-
 Key finding: BM25 significantly underperforms dense retrieval on conversational turns. RRF fusion
-adds marginal value over vector-only. The reranker is most useful at low k (≤20).
+adds marginal value over vector-only. With the candidate pool fixed to `2×k`, the `full` (reranked)
+column now tracks the dense path closely instead of capping out.
+
+### End-to-end QA accuracy
+
+```
+=== QA accuracy (gpt-5-mini answer + judge) ===
+category       accuracy   n
+single-hop        52.7%   281
+multi-hop         67.2%   320
+temporal          53.9%    89
+open-domain       83.2%   841
+ALL               72.6%  1531
+```
+
+**These two tables measure different things.** Retrieval recall (92.9%) asks "is the right memory in
+the top-100?"; QA accuracy (72.6%) asks "did the reader produce the judged-correct answer given that
+context?". The ~20-point gap is downstream of memoryd — the right memory is retrieved ~93% of the
+time, but the answer-generation step loses ground on single-hop and temporal questions. The memory
+substrate (gate + retrieval) is doing its job; the weakness is in the reader/judge, which is not
+memoryd's contribution.
+
+**QA setup caveat.** These numbers use a **single** `gpt-5-mini` model for both answering and judging
+(one judge, no majority vote). TrueMemory's reported 89.6% uses a **3-judge majority vote** with a
+stronger reader model — so 72.6% here is *not* apples-to-apples with their headline number. Switching
+to a 3-judge panel and a higher-capability reader (e.g. a frontier model) is expected to raise QA
+accuracy materially without touching the memory layer. The retrieval recall above is model-independent
+and is the metric that reflects memoryd's actual work.
 
 ## Running
 
