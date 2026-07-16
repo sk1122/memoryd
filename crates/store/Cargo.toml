@@ -16,7 +16,7 @@ name = "locomo_qa"
 path = "src/bin/locomo_qa.rs"
 
 [dependencies]
-memoryd = { path = "../.." }            # novelty + salience + correction signals
+signals = { path = "../signals" }       # novelty + salience + correction signals
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"] }
 pgvector = { version = "0.4", default-features = false, features = ["sqlx"] }
 fastembed = "4"

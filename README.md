@@ -25,6 +25,8 @@ memoryd's `ConsolidationModel` trait (M5) is the interface point for this.
 memoryd (lib)          novelty + salience + correction signals
 crates/store           storage core, retrieval pipeline, ingestion gate
 crates/spikes          one-shot integration probes (M0)
+src/bin/memplay.rs     interactive developer harness (REPL) for the substrate
+src/bin/memchat.rs     memory-grounded chat TUI (ratatui + crossterm)
 docker/                ParadeDB (Postgres 18 + pg_search + pgvector) container
 data/                  locomo10.json benchmark + embedding caches
 ```
@@ -161,6 +163,93 @@ cargo run --release --bin locomo_eval
 cargo run -p store --release --bin ingest_demo
 ```
 
+### Run the interactive developer harness (memplay)
+
+`memplay` is an interactive REPL for exploring the memory substrate live —
+ingest through the gate, recall with the full retrieval pipeline, and flip
+between raw / lazy-consolidated / eager-consolidated views of the same recall
+to see what consolidation does. Requires the ParadeDB container.
+
+```bash
+cargo run --bin memplay -- [--agent <id>] [--fresh]
+```
+
+`--fresh` drops and recreates the `messages` table at 384-dim (bge-small) for a
+clean slate — use it if a prior `locomo_qa` / `longmemeval_qa` run left the
+table at a different vector width (the harness embeds with bge-small, 384-dim).
+
+Inside the REPL:
+
+```
+<text>            ingest through the novelty + salience gate
+?<query>          recall top-k (uses current :mode and :model)
+:seed             load a scripted demo conversation (exercises every gate branch)
+:list [n]         recent memories, newest first
+:show <id>        raw memory + any stored consolidation
+:consolidate [m]  run the consolidation worker once over pending memories
+:profile          per-agent memory stats
+:mode <m>         none | lazy | eager   (recall view)
+:model <m>        extractive | openai   (consolidation model)
+:scope <s>        private | shared      (ingest scope)
+:role <r>         user | assistant | system
+:agent <id>       switch active agent (multi-agent isolation demo)
+:k <n>            recall top-k
+:count            total rows in the store
+:fresh            drop + recreate messages table at 384-dim (erases everything)
+:reset            truncate the store (keeps vector dim)
+:quit             exit
+```
+
+A typical showcase session:
+
+```
+:seed                       # load scripted conversation, watch the gate decide
+?where does the user work   # recall raw hits (mode=none)
+:mode eager
+:consolidate                # run the extractive consolidator over pending
+?where does the user work   # same recall, now showing consolidated bodies
+:mode lazy
+?tell me about Scout        # consolidate each hit on the fly
+```
+
+### Chat with it in the TUI (memchat)
+
+`memchat` is a full-screen terminal UI for chatting with a memory-grounded
+agent. Each message you send is ingested through the gate, used as a recall
+query (BM25 + dense + RRF + cross-encoder), and answered by an LLM grounded in
+the recalled memories; the assistant's reply is itself ingested so the
+conversation has continuity — the agent remembers what it just told you.
+
+```bash
+# Echo mode — no API key needed; answers surface the recalled memories
+cargo run --bin memchat -- [--agent <id>] [--fresh]
+
+# Grounded LLM replies (gpt-5-mini)
+OPENAI_API_KEY=sk-... cargo run --bin memchat -- [--agent <id>] [--fresh]
+```
+
+`--fresh` drops + recreates the `messages` table at 384-dim (bge-small) — use it
+if a prior `locomo_qa` / `longmemeval_qa` run left the table at 768-dim.
+
+Layout: chat transcript (left) + recalled-memory panel (right, shows the hits
+grounding the latest reply with ids + scores) + status bar + input box.
+
+```
+<text>        send a message (ingested → recalled → answered)
+:<command>    run a command
+↑ / ↓         scroll transcript   PgUp/PgDn · Home/End
+?             toggle help
+Esc / Ctrl-C  quit
+```
+
+Commands: `:seed` `:agent <id>` `:scope private|shared` `:mode none|lazy|eager`
+`:model extractive|openai` `:k <n>` `:consolidate [m]` `:profile` `:fresh y`
+`:reset y` `:clear` `:help`.
+
+A pty smoke-test harness lives at `scripts/smoke_memchat.py` (drives the TUI
+through a pseudo-terminal: `:seed` → a chat message → Ctrl-C, and asserts a
+clean exit).
+
 ### Run the M2 ingestion benchmark
 
 ```bash
@@ -228,3 +317,4 @@ dim = 384
 | `flate2` (zlib-rs) | gzip novelty — pure-Rust zlib matching CPython byte-for-byte |
 | `jsonwebtoken` | Service account JWT for Google Vertex AI auth |
 | `reqwest` | Async HTTP — Vertex AI embedding API + OpenAI QA/judge calls |
+| `ratatui` + `crossterm` | `memchat` TUI — chat with a memory-grounded agent |

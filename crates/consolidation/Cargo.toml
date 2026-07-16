@@ -1,0 +1,12 @@
+[package]
+name = "consolidation"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+store   = { path = "../store" }
+anyhow  = "1"
+tokio   = { version = "1", features = ["time", "macros", "rt-multi-thread", "sync"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"

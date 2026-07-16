@@ -11,12 +11,14 @@
 //! the compression context is now actual vector-nearest memory, not a recency
 //! window.
 
+pub mod google_embed;
+
 use anyhow::Result;
 use sqlx::AssertSqlSafe;
 use fastembed::{
     EmbeddingModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding, TextRerank,
 };
-use memoryd::{compression_novelty, is_correction, rule_salience};
+use signals::{compression_novelty, is_correction, rule_salience};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
@@ -29,6 +31,31 @@ pub struct Hit {
     pub id: i64,
     pub text: String,
     pub score: f64,
+}
+
+/// A stored memory row returned by `Store::list`.
+#[derive(Debug)]
+pub struct MemoryRow {
+    pub id: i64,
+    pub scope: String,
+    pub role: String,
+    pub text: String,
+    pub ts: i64,
+    pub novelty: Option<f32>,
+    pub salience: Option<f32>,
+}
+
+/// Per-agent memory statistics returned by `Store::profile`.
+#[derive(Debug)]
+pub struct Profile {
+    pub agent_id: String,
+    pub total: i64,
+    pub private: i64,
+    pub shared: i64,
+    pub avg_novelty: f64,
+    pub avg_salience: f64,
+    pub oldest_ts: Option<i64>,
+    pub newest_ts: Option<i64>,
 }
 
 /// Reciprocal Rank Fusion of several ranked id-lists. K=60 is the standard.
@@ -159,6 +186,31 @@ impl Store {
         )
         .execute(&self.pool)
         .await?;
+
+        // M5: consolidations table — one row per (message, model).
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS consolidations (
+                id          BIGSERIAL PRIMARY KEY,
+                message_id  BIGINT NOT NULL,
+                topic_path  TEXT NOT NULL,
+                title       TEXT NOT NULL,
+                body        TEXT NOT NULL,
+                foresight   TEXT NOT NULL,   -- JSON array
+                model       TEXT NOT NULL,
+                ts          BIGINT NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS consolidations_msg_model \
+             ON consolidations (message_id, model)",
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 
@@ -417,6 +469,11 @@ impl Store {
 
     /// Drop and recreate the messages table + indexes with a new vector dimension.
     /// Used by benchmarks that use a different embedding model than the default.
+    ///
+    /// Also truncates `consolidations`: message ids restart at 1 on every
+    /// reset, so stale consolidation rows from a prior run would otherwise
+    /// silently attach to the wrong (newly inserted) messages and make
+    /// `pending_consolidation` skip them as "already done".
     pub async fn reset_for_dim(&self, dim: usize) -> Result<()> {
         sqlx::query("DROP TABLE IF EXISTS messages").execute(&self.pool).await?;
         sqlx::query(AssertSqlSafe(format!(
@@ -446,6 +503,7 @@ impl Store {
         )
         .execute(&self.pool)
         .await?;
+        sqlx::query("TRUNCATE consolidations").execute(&self.pool).await?;
         Ok(())
     }
 
@@ -455,5 +513,205 @@ impl Store {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    // ── M5 consolidation DB ops ──────────────────────────────────────────────
+
+    /// Count of messages not yet consolidated by `model`. Used by callers to
+    /// detect "fully drained" vs. "stuck on persistently-failing messages"
+    /// without relying on a per-tick attempted/succeeded count.
+    pub async fn pending_consolidation_count(&self, model: &str) -> Result<i64> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages \
+             WHERE id NOT IN (SELECT message_id FROM consolidations WHERE model = $1)",
+        )
+        .bind(model)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n)
+    }
+
+    /// Messages not yet consolidated by `model`, grouped by agent (so the
+    /// caller can cluster contiguous rows per-agent) then newest first within
+    /// each agent.
+    pub async fn pending_consolidation(
+        &self,
+        model: &str,
+        limit: i64,
+    ) -> Result<Vec<(i64, String, String)>> {
+        let rows: Vec<(i64, String, String)> = sqlx::query_as(
+            "SELECT id, agent_id, text FROM messages \
+             WHERE id NOT IN \
+               (SELECT message_id FROM consolidations WHERE model = $1) \
+             ORDER BY agent_id, ts DESC LIMIT $2",
+        )
+        .bind(model)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Upsert a consolidation result. Fields are passed individually to avoid
+    /// a crate circular dependency between `store` and `consolidation`.
+    pub async fn store_consolidation(
+        &self,
+        message_id: i64,
+        topic_path: &str,
+        title: &str,
+        body: &str,
+        foresight_json: &str,
+        model: &str,
+    ) -> Result<i64> {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO consolidations \
+               (message_id, topic_path, title, body, foresight, model, ts) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7) \
+             ON CONFLICT (message_id, model) DO UPDATE \
+               SET topic_path=$2, title=$3, body=$4, foresight=$5, ts=$7 \
+             RETURNING id",
+        )
+        .bind(message_id)
+        .bind(topic_path)
+        .bind(title)
+        .bind(body)
+        .bind(foresight_json)
+        .bind(model)
+        .bind(ts)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(id)
+    }
+
+    /// Fetch the consolidation for a specific message + model, if it exists.
+    pub async fn get_consolidation(
+        &self,
+        message_id: i64,
+        model: &str,
+    ) -> Result<Option<(String, String, String, String)>> {
+        let row: Option<(String, String, String, String)> = sqlx::query_as(
+            "SELECT topic_path, title, body, foresight \
+             FROM consolidations WHERE message_id = $1 AND model = $2",
+        )
+        .bind(message_id)
+        .bind(model)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    // ── High-level memory API (used by CLI + MCP server in M4) ─────────────
+
+    /// Elevate a private memory to shared scope (visible to all agents).
+    /// Returns `false` if the id doesn't exist or doesn't belong to `agent_id`.
+    pub async fn promote(&self, agent_id: &str, id: i64) -> Result<bool> {
+        let r = sqlx::query(
+            "UPDATE messages SET scope = 'shared' WHERE id = $1 AND agent_id = $2",
+        )
+        .bind(id)
+        .bind(agent_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    /// Delete a memory. Returns `false` if the id doesn't exist or doesn't
+    /// belong to `agent_id`.
+    pub async fn forget(&self, agent_id: &str, id: i64) -> Result<bool> {
+        let r = sqlx::query("DELETE FROM messages WHERE id = $1 AND agent_id = $2")
+            .bind(id)
+            .bind(agent_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    /// Memory statistics for one agent.
+    pub async fn profile(&self, agent_id: &str) -> Result<Profile> {
+        let total: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE agent_id = $1")
+                .bind(agent_id)
+                .fetch_one(&self.pool)
+                .await?;
+        let shared: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE agent_id = $1 AND scope = 'shared'",
+        )
+        .bind(agent_id)
+        .fetch_one(&self.pool)
+        .await?;
+        let avg_novelty: Option<f64> =
+            sqlx::query_scalar("SELECT AVG(novelty) FROM messages WHERE agent_id = $1")
+                .bind(agent_id)
+                .fetch_one(&self.pool)
+                .await?;
+        let avg_salience: Option<f64> =
+            sqlx::query_scalar("SELECT AVG(salience) FROM messages WHERE agent_id = $1")
+                .bind(agent_id)
+                .fetch_one(&self.pool)
+                .await?;
+        let oldest_ts: Option<i64> =
+            sqlx::query_scalar("SELECT MIN(ts) FROM messages WHERE agent_id = $1")
+                .bind(agent_id)
+                .fetch_one(&self.pool)
+                .await?;
+        let newest_ts: Option<i64> =
+            sqlx::query_scalar("SELECT MAX(ts) FROM messages WHERE agent_id = $1")
+                .bind(agent_id)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(Profile {
+            agent_id: agent_id.to_string(),
+            total,
+            private: total - shared,
+            shared,
+            avg_novelty: avg_novelty.unwrap_or(0.0),
+            avg_salience: avg_salience.unwrap_or(0.0),
+            oldest_ts,
+            newest_ts,
+        })
+    }
+
+    /// Most recent memories for an agent, newest first.
+    pub async fn list(&self, agent_id: &str, limit: i64) -> Result<Vec<MemoryRow>> {
+        let rows: Vec<(i64, String, String, String, i64, Option<f32>, Option<f32>)> =
+            sqlx::query_as(
+                "SELECT id, scope, role, text, ts, novelty, salience \
+                 FROM messages WHERE agent_id = $1 ORDER BY ts DESC LIMIT $2",
+            )
+            .bind(agent_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, scope, role, text, ts, novelty, salience)| MemoryRow {
+                id,
+                scope,
+                role,
+                text,
+                ts,
+                novelty,
+                salience,
+            })
+            .collect())
+    }
+
+    /// All messages for one agent, in insertion order. `id` (BIGSERIAL) is
+    /// used rather than `ts` — a tight insert loop can produce duplicate
+    /// millisecond timestamps, but ids are strictly monotonic. Used by eval
+    /// harnesses to recover a turn-index -> message-id mapping after an
+    /// interrupted run, without re-inserting (and re-paying for embeddings).
+    pub async fn messages_for_agent(&self, agent_id: &str) -> Result<Vec<(i64, String)>> {
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, text FROM messages WHERE agent_id = $1 ORDER BY id ASC",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 }
